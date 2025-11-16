@@ -18,6 +18,7 @@ class MpcParams:
     u_max: float
     r_dist: float
     r_ang: float
+    r_w: float
     r_u: float
     r_u_diff: float
     a_comf: float
@@ -30,6 +31,7 @@ class MpcParams:
                 u_max: float,
                 r_dist: float,
                 r_ang: float,
+                r_w: float,
                 r_u: float,
                 r_u_diff: float,
                 a_comf: float,
@@ -41,11 +43,24 @@ class MpcParams:
         self.u_max = u_max
         self.r_dist = r_dist
         self.r_ang = r_ang
+        self.r_w = r_w
         self.r_u = r_u
         self.r_u_diff = r_u_diff
         self.a_comf = a_comf
         self.jerk_max = jerk_max
 
+
+def print_params(cfg: MpcParams):
+    print("mpc_horizont: ", cfg.mpc_horizont)
+    print("n_delay: ", cfg.n_delay)
+    print("ts", cfg.ts)
+    print("du_max: ", cfg.du_max)
+    print("u_max: ", cfg.u_max)
+    print("r_dist: ", cfg.r_dist)
+    print("r_ang: ", cfg.r_ang)
+    print("r_w: ", cfg.r_w)
+    print("r_u: ", cfg.r_u)
+    
 def is_discrete(model):
     try:
         if(model.disc_dyn_expr == []):
@@ -54,10 +69,11 @@ def is_discrete(model):
         return True
     return True
 
-def create_car_solver(model: AcadosModel, params: MpcParams, increment_mode):
+def create_car_solver(model: AcadosModel, params: MpcParams, increment_mode, rwa_pos = 2):
     # Create OCP object
+
     ocp = AcadosOcp()
-    ocp.parameter_values = np.array([0, 0])
+    ocp.parameter_values = np.zeros(model.p.size()[0])
     ocp.model = model
 
     # Dimensions
@@ -73,10 +89,10 @@ def create_car_solver(model: AcadosModel, params: MpcParams, increment_mode):
     # Define cost function directly using states and controls
     x, u = model.x, model.u
     # tau, psi, rwa = model.x
-    v, c = model.p.elements()
+    vx, c = model.p.elements()
 
     # Weighting matrices
-    Q = np.diag([params.r_dist, params.r_ang])  # state weights
+    Q = np.diag([params.r_dist, 0*params.r_ang])  # state weights
     R = np.diag([params.r_u])
     R_diff = np.diag([params.r_u_diff])
     cost_expr = quadform(model.x[:2], Q) #+ quadform(du, R)
@@ -89,12 +105,14 @@ def create_car_solver(model: AcadosModel, params: MpcParams, increment_mode):
         ocp.constraints.lbu = np.array([-params.du_max])
         ocp.constraints.ubu = np.array([params.du_max])
 
-        rwa = x[2]
-        jerk = v * v * u
+        rwa = x[rwa_pos]
+        jerk = vx * vx * u
         ocp.model.con_h_expr = vertcat(rwa, jerk)
+        # ocp.constraints.lh = np.array([-params.u_max, -params.jerk_max])  # Lower bounds
+        # ocp.constraints.uh = np.array([params.u_max, params.jerk_max])   # Upper bounds
         ocp.constraints.lh = np.array([-params.u_max, -params.jerk_max])  # Lower bounds
         ocp.constraints.uh = np.array([params.u_max, params.jerk_max])   # Upper bounds
-
+        
         cost_expr += quadform(rwa - c, R)
         cost_expr += quadform(u, R_diff)
 
@@ -136,6 +154,168 @@ def create_car_solver(model: AcadosModel, params: MpcParams, increment_mode):
     # ocp.solver_options.json_file = str(generated_folder / 'acados_ocp_nlp2.json')
     solver = AcadosOcpSolver(ocp)
     return solver
+
+
+def create_car_solver_dynamic(model: AcadosModel, params: MpcParams, increment_mode, rwa_pos = 4):
+    # Create OCP object
+
+    ocp = AcadosOcp()
+    ocp.parameter_values = np.zeros(model.p.size()[0])
+    ocp.model = model
+
+    # Dimensions
+    Tf = params.mpc_horizont * params.ts  # prediction horizon [s]
+    N = params.mpc_horizont    # number of shooting nodes
+
+    ocp.dims.N = N
+
+    # Use EXTERNAL cost to avoid y_expr issues
+    ocp.cost.cost_type = 'EXTERNAL'
+    ocp.cost.cost_type_e = 'EXTERNAL'
+
+    # Define cost function directly using states and controls
+    x, u = model.x, model.u
+    # tau, psi, rwa = model.x
+    vx, c = model.p.elements()
+
+    # Weighting matrices
+    Q = np.diag([params.r_dist, 0*params.r_ang])  # state weights
+    R = np.diag([params.r_u])
+    R_diff = np.diag([params.r_u_diff])
+    
+    cost_expr = quadform(model.x[:2], Q) #+ quadform(du, R)
+    cost_expr += quadform(model.x[3] - c * vx, params.r_w)
+    cost_expr_e = 10 * quadform(model.x[:2], Q)
+
+    ocp.constraints.idxbu = np.array([0])  # Constrain Δu
+
+    if (increment_mode):
+        ocp.constraints.lbu = np.array([-params.du_max])
+        ocp.constraints.ubu = np.array([params.du_max])
+
+        rwa = x[rwa_pos]
+        jerk = vx * vx * u
+        ocp.model.con_h_expr = vertcat(rwa, jerk)
+        # ocp.constraints.lh = np.array([-params.u_max, -params.jerk_max])  # Lower bounds
+        # ocp.constraints.uh = np.array([params.u_max, params.jerk_max])   # Upper bounds
+        ocp.constraints.lh = np.array([-params.u_max, -params.jerk_max])  # Lower bounds
+        ocp.constraints.uh = np.array([params.u_max, params.jerk_max])   # Upper bounds
+        
+        cost_expr += quadform(rwa - c, R)
+        cost_expr += quadform(u, R_diff)
+
+    else:
+        ocp.constraints.lbu = np.array([-params.u_max])
+        ocp.constraints.ubu = np.array([params.u_max])
+
+        if (params.n_delay > 0):
+            u_actual = x[-1]
+        else:
+            u_actual = u
+
+        cost_expr += quadform(u_actual - c, R)
+        cost_expr += quadform(u - c, R / 10)
+
+    ocp.constraints.x0 = np.zeros(len(model.x.elements()))
+
+    discrete: bool = is_discrete(model)
+    #ocp.solver_options.hessian_approx = 'EXACT'
+
+    ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
+    ocp.solver_options.hessian_approx = 'GAUSS_NEWTON'
+    ocp.solver_options.integrator_type = 'ERK'
+    ocp.solver_options.nlp_solver_type = 'SQP_RTI'
+
+    if (discrete):
+        ocp.solver_options.integrator_type = 'DISCRETE'
+    else:
+        ocp.solver_options.integrator_type = 'ERK'
+
+    ocp.model.cost_expr_ext_cost = cost_expr
+    ocp.model.cost_expr_ext_cost_e = cost_expr_e
+    ocp.solver_options.N_horizon = N
+    ocp.solver_options.tf = Tf
+    ocp.solver_options.qp_solver_warm_start = True
+
+    # ocp.solver_options.code_export_directory = str(generated_folder)
+    # ocp.code_export_directory = str(generated_folder)
+    # ocp.solver_options.json_file = str(generated_folder / 'acados_ocp_nlp2.json')
+    solver = AcadosOcpSolver(ocp)
+    return solver
+
+
+
+def create_dynamic_model(params: MpcParams, model_name: str, use_sliping = True):
+    tau = SX.sym('tau')
+    psi = SX.sym('psi')
+    rwa = SX.sym('rwa')
+    delayed_buf_u = SX.sym('delayed_u', params.n_delay)
+    du =  SX.sym('du')
+    vx = SX.sym('vx')
+    vy = SX.sym('vy')
+    wz = SX.sym('wz')
+    c = SX.sym('c')
+
+    p = vertcat(vx, c)
+    Ts = params.ts
+    wheelbase = 2.5
+    a = 1.44
+    b = wheelbase - a
+    m = 1580
+    J = 3650
+    Cf = 75 * 1e3
+    Cr = 75 * 1e3
+
+    def continuous_dynamics(x, rwa, p):
+        tau, psi, vy, wz = x[0], x[1], x[2], x[3]
+        vx, c = p[0], p[1]#, p[2],  p[3]
+        if(use_sliping):
+            dtau = np.sin(psi) + vy / vx * np.cos(psi) 
+            dpsi = wz  - c * (vx * np.cos(psi) - vy * np.sin(psi)) / (1 - c * tau * vx)
+        else:
+            dtau = np.sin(psi) 
+            dpsi = wz  - c * (vx * np.cos(psi)) / (1 - c * tau * vx) 
+
+        alfa_f = np.arctan2(vy + wheelbase * wz, vx) - rwa
+        alfa_r =  np.arctan2(vy, vx)
+        Ff = -alfa_f * Cf 
+        Fr = -alfa_r * Cr 
+
+        wz_dot = (a * Ff - b * Fr)/J
+        vy_dot = (Ff + Fr)/m - vx * wz + wz_dot * b
+        
+        return vertcat(dtau, dpsi, vy_dot, wz_dot)
+    
+    delayed_u = delayed_buf_u[-1] if delayed_buf_u.shape[0] > 0 else rwa
+
+    x = vertcat(tau, psi, vy, wz)
+    k1 = continuous_dynamics(x, delayed_u, p)
+    k2 = continuous_dynamics(x + 0.5 * Ts * k1, delayed_u, p)
+    k3 = continuous_dynamics(x + 0.5 * Ts * k2, delayed_u, p)
+    k4 = continuous_dynamics(x + Ts * k3, delayed_u, p)
+    x_next = x + (Ts / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
+    x = vertcat(x, rwa)
+    rwa_newt = rwa + du * Ts
+    x_next = vertcat(x_next, rwa_newt)
+
+    delay_dynamics = []
+    for i in range(params.n_delay):
+        if i == 0:
+            delay_dynamics.append(rwa)
+        else:
+            delay_dynamics.append(delayed_buf_u[i-1])
+
+    x_next = vertcat(x_next, *delay_dynamics)
+    x = vertcat(x, delayed_buf_u)
+
+    model = AcadosModel()
+    model.disc_dyn_expr = x_next
+    model.x = x
+    model.u = du
+    model.p = p
+    model.name = model_name
+    return model
 
 def create_discrete_bicycle_model_rk4(params: MpcParams, model_mane: str):
     tau = SX.sym('tau')

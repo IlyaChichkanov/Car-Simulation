@@ -40,9 +40,9 @@ class PID_Controller(Controller):
         self.yaw_rate_conpensation = yaw_rate_conpensation
     def action(self, x0):
         d, psi = x0[:2]
-        print("action")
-        print(self.K_fb, x0)
-        uff = self.curv  * np.cos(psi)/(1 - self.curv * d)  #self.wheelbase 
+        #print("action")
+        #print(self.K_fb, x0)
+        uff = self.curv  * np.cos(psi)/(1 - self.curv * d)  *self.wheelbase 
         yaw_rate_fb = 0
         if(self.yaw_rate_conpensation and len(self.K_fb) > 2):
             w = x0[3]

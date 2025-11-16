@@ -57,8 +57,22 @@ class KinematicBycicleDiffPertubation(System):
 
 
 
+class LinearSystem(System):
+    def __init__(self, A, B, D):
+        self.A = A
+        self.B = B
+        self.D = D
+        x_len = A.shape[0]
+        u_len = B.shape[1]
+        param_len = D.shape[1]
+        self.state = SX.sym('x', x_len)
+        self.input_signals = SX.sym('u', u_len)
+        self.params = SX.sym('p', param_len)
 
-
+    def get_system(self):
+        f = self.A@self.state + self.B*self.input_signals + self.D[:, 1]*self.params[1]
+        return self.state, self.input_signals, self.params, f
+    
 class KinematicBycicle(System):
     def __init__(self):
         self.state = [SX.sym('d'), SX.sym('psi')]
@@ -77,6 +91,26 @@ class KinematicBycicle(System):
         d_dot = v * np.sin(psi) 
         psi_dot = w - v * c * np.cos(psi) / (1 - c * d) 
         return vertcat(*self.state), vertcat(*self.input_signals), vertcat(*self.params), vertcat(d_dot, psi_dot) 
+
+class KinematicBycicleLin(System):
+    def __init__(self):
+        self.state = [SX.sym('d'), SX.sym('psi')]
+        self.input_signals = [SX.sym('u')]
+        self.params = [SX.sym('v'), SX.sym('c')]
+        self.wheelbase = 2.5
+
+    def get_system(self):
+        v, c  = self.params
+        u  = self.input_signals[0] #2.65
+        d, psi = self.state
+
+        rwa = u
+        w = v * rwa/ self.wheelbase
+
+        d_dot = v * np.sin(psi) 
+        psi_dot = w - v * c -v*v*d
+        return vertcat(*self.state), vertcat(*self.input_signals), vertcat(*self.params), vertcat(d_dot, psi_dot) 
+
 
 class KinematicBycicleDiff(System):
     def __init__(self):
@@ -124,75 +158,53 @@ class KinematicBycicleTau(System):
 
     
 class DynamicBycicle(System):
-    def __init__(self, m = 1580, J = 3650, a = 1.44, wheelbase = 2.65, Cf = 50*1e3, Cr = 50*1e3):
-        self.state = [SX.sym('d'), SX.sym('psi'), SX.sym('wz'), SX.sym('vy')]
+    def __init__(self, m = 1580, J = 3650, a = 1.44, wheelbase = 2.65, Cf = 75*1e3, Cr = 75*1e3, use_slipping = True):
+        self.state = [SX.sym('d'), SX.sym('psi'), SX.sym('vy'), SX.sym('wz')]
         self.input_signals = [SX.sym('u')]
         self.params = [SX.sym('vx'), SX.sym('c')]
         self.a = a
         self.b = wheelbase - a
-        self.rot_m = np.linalg.inv(np.array([[1, self.b], [0, 1]]))
-        self.rot_m = np.array([[1, self.b], [0, 1]])
         self.Cf = Cf
         self.Cr = Cr
         self.wheelbase = wheelbase
         self.m = m
         self.J = J
+        self.use_slipping = use_slipping
 
     def get_system(self):
-        d, psi, wz, vy = self.state
+        d, psi, vy, wz = self.state
         vx, c = self.params
         delta = self.input_signals[0]
 
-        alfa_f = np.arctan2(vy + self.a * wz, vx) - delta
-        alfa_r =  np.arctan2(vy - self.b * wz, vx)
+        alfa_f = np.arctan2(vy + self.wheelbase * wz, vx) - delta
+        alfa_r =  np.arctan2(vy, vx)
+        alfa_f = (vy + self.wheelbase * wz)/ vx - delta
+        alfa_r =  vy/ vx
+
         Ff = -alfa_f * self.Cf 
         Fr = -alfa_r * self.Cr 
 
         wz_dot = (self.a * Ff - self.b * Fr)/self.J
-        vy_dot = (Ff + Fr)/self.m - vx * wz #- wz_dot
-        
+        vy_dot = (Ff + Fr)/self.m - vx * wz + wz_dot*self.b
 
-        d_dot = vx * np.sin(psi)
-        psi_dot = wz -  vx * c * np.cos(psi)/(1 - c * d)
+        if(self.use_slipping):
+            d_dot = vx * np.sin(psi) + vy * np.cos(psi) 
+            psi_dot = wz  - c * (vx * np.cos(psi) - vy * np.sin(psi)) / (1 - c * d)
+        else:
+            d_dot = vx * np.sin(psi) 
+            psi_dot = wz  - c * (vx * np.cos(psi)) / (1 - c * d) 
+            
+        if (self.use_slipping):
+            d_dot = vx *psi +  vy 
+            psi_dot = wz -  c * (vx - vy * psi)*(1 + c * d)
+        else:
+            d_dot = vx * psi
+            psi_dot = wz -   c * (vx) *(1 + c * d) 
 
-        #vy_dot, wz_dot = self.rot_m@np.array([vy_dot, wz_dot])
-        state_dot = vertcat(d_dot, psi_dot, wz_dot, vy_dot)
+        state_dot = vertcat(d_dot, psi_dot, vy_dot, wz_dot)
         return vertcat(*self.state), vertcat(*self.input_signals), vertcat(*self.params), state_dot
 
-class DynamicBycicleDiff(System):
-    def __init__(self, m = 1580, J = 3650, a = 1.44, wheelbase = 2.65, Cf = 50*1e3, Cr = 50*1e3):
-        self.state = [SX.sym('d'), SX.sym('psi'), SX.sym('rwa'), SX.sym('wz'), SX.sym('vy')]
-        self.input_signals = [SX.sym('u')]
-        self.params = [SX.sym('vx'), SX.sym('c')]
-        self.a = a
-        self.b = wheelbase - a
-        self.rot_m = np.linalg.inv(np.array([[1, self.b], [0, 1]]))
-        self.rot_m = np.array([[1, self.b], [0, 1]])
-        self.Cf = Cf
-        self.Cr = Cr
-        self.wheelbase = wheelbase
-        self.m = m
-        self.J = J
 
-    def get_system(self):
-        d, psi, rwa, wz, vy = self.state
-        vx, c = self.params
-        u = self.input_signals[0]
-
-        alfa_f = np.arctan2(vy + self.a * wz, vx) - rwa
-        alfa_r =  np.arctan2(vy - self.b * wz, vx)
-        Ff = -alfa_f * self.Cf 
-        Fr = -alfa_r * self.Cr 
-
-        vy_dot = (Ff + Fr)/self.m - vx * wz
-        wz_dot = (self.a * Ff - self.b * Fr)/self.J
-
-        d_dot = vx * np.sin(psi)
-        psi_dot = wz - vx * c * np.cos(psi)/(1 - c * d)
-        rwa_dot = u
-        #vy_dot, wz_dot = self.rot_m@np.array([vy_dot, wz_dot])
-        state_dot = vertcat(d_dot, psi_dot, rwa_dot, wz_dot, vy_dot)
-        return vertcat(*self.state), vertcat(*self.input_signals), vertcat(*self.params), state_dot
     
 class KinematicBycicleActuator(System):
     def __init__(self):
@@ -298,9 +310,13 @@ class Integrator:
         
         self.model = model
         JacA = jacobian(model.f_expl_expr, model.x)
-        self.jacA = Function('J_p', vertcat(model.x, model.u, model.p).elements(), [JacA])
+        self.jacA = Function('J_a', vertcat(model.x, model.u, model.p).elements(), [JacA])
         JacB = jacobian(model.f_expl_expr, model.u)
-        self.jacB = Function('J_p', vertcat(model.x, model.u, model.p).elements(), [JacB])
+        self.jacB = Function('J_b', vertcat(model.x, model.u, model.p).elements(), [JacB])
+
+        JacP = jacobian(model.f_expl_expr, model.p)
+        self.jacP = Function('J_b', vertcat(model.x, model.u, model.p).elements(), [JacP])
+
         self.x_len = len(model.x.elements())
         self.control_len = len(model.u.elements())
         self.param_len = len(model.p.elements())
@@ -344,10 +360,11 @@ class Integrator:
     def get_lin_system_dynamics(self, state, control_inputs, params):
         assert len(state) == self.x_len
         assert len(control_inputs) == self.control_len
-        assert len(params) == self.param_len
+        #assert len(params) == self.param_len
         A = np.array(self.jacA(*state, *control_inputs, *params))#[0]
         B = np.array(self.jacB(*state, *control_inputs, *params))#[0]
-        return A, B
+        D = np.array(self.jacP(*state, *control_inputs, *params))#[0]
+        return A, B, D#[:, 1:]
     
 def get_close_loop_matrix(A, B, K_fb):
     state_length = A.shape[0]
