@@ -163,7 +163,6 @@ class DynamicBycicle(System):
         self.input_signals = [SX.sym('u')]
         self.params = [SX.sym('vx'), SX.sym('c')]
         self.a = a
-        self.b = wheelbase - a
         self.Cf = Cf
         self.Cr = Cr
         self.wheelbase = wheelbase
@@ -183,9 +182,9 @@ class DynamicBycicle(System):
 
         Ff = -alfa_f * self.Cf 
         Fr = -alfa_r * self.Cr 
-
-        wz_dot = (self.a * Ff - self.b * Fr)/self.J
-        vy_dot = (Ff + Fr)/self.m - vx * wz + wz_dot*self.b
+        b = self.wheelbase - self.a
+        wz_dot = (self.a * Ff - b * Fr)/self.J
+        vy_dot = (Ff + Fr)/self.m - vx * wz + wz_dot*b
 
         if(self.use_slipping):
             d_dot = vx * np.sin(psi) + vy * np.cos(psi) 
@@ -313,9 +312,12 @@ class Integrator:
         self.jacA = Function('J_a', vertcat(model.x, model.u, model.p).elements(), [JacA])
         JacB = jacobian(model.f_expl_expr, model.u)
         self.jacB = Function('J_b', vertcat(model.x, model.u, model.p).elements(), [JacB])
+        curvature = model.p[1]
+        JacCuv = jacobian(model.f_expl_expr, curvature)
+        self.jacD = Function('J_D', vertcat(model.x, model.u, model.p).elements(), [JacCuv])
 
-        JacP = jacobian(model.f_expl_expr, model.p)
-        self.jacP = Function('J_b', vertcat(model.x, model.u, model.p).elements(), [JacP])
+        JacParam = jacobian(model.f_expl_expr, model.p[2:])
+        self.jacP = Function('J_P', vertcat(model.x, model.u, model.p).elements(), [JacParam])
 
         self.x_len = len(model.x.elements())
         self.control_len = len(model.u.elements())
@@ -357,14 +359,18 @@ class Integrator:
         )
         return solution1.y.T
     
+    def get_jac_param(self, state, control_inputs, params):
+        P = np.array(self.jacP(*state, *control_inputs, *params))#[0]
+        return P
+    
     def get_lin_system_dynamics(self, state, control_inputs, params):
         assert len(state) == self.x_len
         assert len(control_inputs) == self.control_len
         #assert len(params) == self.param_len
         A = np.array(self.jacA(*state, *control_inputs, *params))#[0]
         B = np.array(self.jacB(*state, *control_inputs, *params))#[0]
-        D = np.array(self.jacP(*state, *control_inputs, *params))#[0]
-        return A, B, D#[:, 1:]
+        D = np.array(self.jacD(*state, *control_inputs, *params))#[0]
+        return A, B, D
     
 def get_close_loop_matrix(A, B, K_fb):
     state_length = A.shape[0]
